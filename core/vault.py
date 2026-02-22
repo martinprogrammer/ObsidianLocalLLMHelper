@@ -50,12 +50,19 @@ def _extract_inline_tags(text: str) -> List[str]:
     return [t.lower() for t in tags]
 
 
-def _extract_title(content: str, filename: str) -> str:
-    """Use first H1 heading, or fall back to filename."""
+def _extract_title(meta: Dict, content: str, filename: str) -> str:
+    """Priority: frontmatter title → first H1 → filename."""
+    if meta.get("title"):
+        return str(meta["title"]).strip().strip('"').strip("'")
     match = re.search(r'^#\s+(.+)$', content, re.MULTILINE)
     if match:
         return match.group(1).strip()
     return filename
+
+
+def _clean_tag(tag) -> str:
+    """Normalise a tag value: strip quotes, lowercase, replace spaces with -."""
+    return str(tag).strip().strip('"').strip("'").lower().replace(" ", "-")
 
 
 def load_note(path: Path, vault_root: Path) -> Optional[Note]:
@@ -65,17 +72,20 @@ def load_note(path: Path, vault_root: Path) -> Optional[Note]:
         meta: Dict = dict(post.metadata)
         body: str = post.content
 
-        # Tags from frontmatter (list or comma string)
+        # Tags from frontmatter — handles:
+        #   tags: ["quoted", "strings"]  (JSON-style, common in Obsidian)
+        #   tags: [bare, yaml, list]
+        #   tags: "comma, separated, string"
         fm_tags = meta.get("tags", [])
         if isinstance(fm_tags, str):
             fm_tags = [t.strip() for t in fm_tags.split(",") if t.strip()]
-        fm_tags = [str(t).lower() for t in fm_tags]
+        fm_tags = [_clean_tag(t) for t in fm_tags if t]
 
         inline_tags = _extract_inline_tags(body)
         all_tags = list(dict.fromkeys(fm_tags + inline_tags))
 
         links = _extract_wiki_links(body)
-        title = _extract_title(body, path.stem)
+        title = _extract_title(meta, body, path.stem)
         words = len(body.split())
 
         return Note(

@@ -57,10 +57,10 @@ def analyze_note(title: str, content: str, related_summaries: List[str] = None) 
 Please provide:
 1. **Atomic Idea Check** – Does this note contain one clear idea? If not, suggest how to split it.
 2. **Zettelkasten Score** (1-10) – How well does it fit atomic note principles? Explain briefly.
-3. **Suggested Tags** – 3-6 specific tags (e.g. #epistemology, #method/qualitative).
+3. **Suggested Tags** – 3-6 specific tags as Obsidian frontmatter, e.g. `tags: ["epistemology", "qualitative-method", "research"]` (lowercase, hyphenated, quoted strings).
 4. **Backlink Suggestions** – Concepts that likely exist or should exist as separate notes.
 5. **Gaps & Expansion** – What is missing or underdeveloped?
-6. **Rewrite Hint** – One-sentence suggestion for a stronger opening/permanent note title.
+6. **Rewrite Hint** – Suggest a stronger permanent note title as a declarative sentence (e.g. "Banal language erodes meaning by normalising cliché"), suitable for Obsidian `title:` frontmatter.
 
 Be direct and specific. Skip preamble.""",
         },
@@ -167,11 +167,13 @@ Source: "{source_title}"
 Content:
 {truncated}
 
-Output a complete Markdown note with:
+Output a complete Markdown note using exactly this format:
 ---
-tags: [suggest 3-5 tags]
+tags: ["tag1", "tag2", "tag3", "tag4"]
+title: "Atomic title — a declarative sentence stating one idea"
 ---
-# [Atomic title — a declarative sentence stating one idea]
+
+# Atomic title — a declarative sentence stating one idea
 
 [2-4 paragraph body: state the idea clearly, explain why it matters, give one example]
 
@@ -182,7 +184,10 @@ tags: [suggest 3-5 tags]
 ## Source
 - {source_title}
 
-Only output the note. No preamble.""",
+Rules:
+- tags must be lowercase, hyphenated (e.g. "knowledge-management"), quoted strings in a JSON array
+- title must be a complete declarative sentence, not a question, in the frontmatter AND as the H1
+- Only output the note. No preamble.""",
         },
     ]
     return stream_response(messages)
