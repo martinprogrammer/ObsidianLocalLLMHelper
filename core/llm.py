@@ -224,6 +224,175 @@ Be specific to the content above.""",
     return stream_response(messages)
 
 
+def identify_research_themes(
+    top_tags: List[tuple],
+    hub_titles: List[str],
+    hub_snippets: List[str],
+    sub_vaults: List[str],
+) -> str:
+    """
+    Step 1: Cluster tags and hub notes into 3-5 broader research themes.
+    Returns full string (non-streaming).
+    """
+    tags_block = "\n".join(f"  {t} ({c} notes)" for t, c in top_tags[:30])
+    hubs_block = "\n".join(
+        f"  [{title}]: {snippet}"
+        for title, snippet in zip(hub_titles[:8], hub_snippets[:8])
+    )
+    vaults = ", ".join(sub_vaults) if sub_vaults else "general"
+
+    messages = [
+        {
+            "role": "system",
+            "content": "You are a research analyst who identifies intellectual patterns in a person's body of work.",
+        },
+        {
+            "role": "user",
+            "content": f"""Analyse these research notes and identify the 3-5 main intellectual themes.
+
+Research areas / sub-vaults: {vaults}
+
+Most-referenced hub notes (with opening text):
+{hubs_block}
+
+Tags by frequency (most written about first):
+{tags_block}
+
+Output ONLY in this exact format — one theme per line, nothing else:
+THEME: Short Theme Name | One sentence describing what this cluster covers
+
+Rules:
+- Group related tags together under a meaningful broader label
+- Theme names should be broad (e.g. "Knowledge Systems & Learning" not "zettelkasten")
+- Capture real intellectual substance, not surface keywords
+- 3 themes minimum, 5 maximum
+- No preamble, no explanation, only THEME: lines""",
+        },
+    ]
+    return _chat(messages, stream=False)
+
+
+def generate_professional_bio(
+    themes: List[Dict],
+    hub_titles: List[str],
+    top_tags: List[str],
+) -> Generator:
+    """
+    Step 2: Write a professional first-person biography from extracted themes.
+    Returns streaming generator.
+    """
+    themes_block = "\n".join(
+        f"  - {t['name']}: {t['description']}" for t in themes
+    )
+    hubs = ", ".join(hub_titles[:6])
+    tags = ", ".join(top_tags[:12])
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You write clear, professional biographies for researchers and independent thinkers. "
+                "You turn a collection of interests into a coherent intellectual identity."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"""Write a professional 150-200 word biography for someone with these research interests.
+
+Their main research themes:
+{themes_block}
+
+Their most-referenced topics: {hubs}
+Their key research tags: {tags}
+
+Requirements:
+- 150-200 words
+- First person: "I work on...", "My research...", "I am interested in..."
+- Opens with a single sentence capturing their overall intellectual focus
+- Weaves through the themes as flowing prose — not a bullet list
+- Concrete and specific — mention actual concepts from the themes, not vague generalities
+- Conversational but professional — suitable for answering "what do you do?" at an event
+- Ends with what drives the work or the broader question it all points toward
+- No jargon, no buzzwords, no mention of note-taking apps
+- Output only the bio, no preamble""",
+        },
+    ]
+    return stream_response(messages)
+
+
+def generate_carousel_items(keyword: str, notes_snippets: List[Dict]) -> str:
+    """
+    Generate flashcard pairs for the Idea Carousel: a short term and one punchy sentence.
+    Returns the full response string (non-streaming).
+    """
+    notes_block = "\n\n".join(
+        f"Note — {n['title']}:\n{n['snippet'][:300]}"
+        for n in notes_snippets[:8]
+    )
+    messages = [
+        {
+            "role": "system",
+            "content": "You create concise flashcards from research notes. Each card has a short label and one crisp sentence.",
+        },
+        {
+            "role": "user",
+            "content": f"""From these notes about "{keyword}", generate flashcard carousel items.
+
+{notes_block}
+
+Reply with 10-14 items in EXACTLY this format, one per line:
+ITEM: Term | One sentence capturing its spirit
+
+Rules:
+- Mix concepts, author names, key claims, and frameworks
+- Term: 1-4 words, punchy
+- Sentence: 8-15 words, memorable — the essence, not a definition
+- No numbering, no preamble, only ITEM: lines
+- Example:
+ITEM: Qualia | The felt redness of red that no brain scan can ever explain
+ITEM: David Chalmers | The philosopher who named the gap between neurons and experience""",
+        },
+    ]
+    return _chat(messages, stream=False)
+
+
+def extract_conversation_prompts(keyword: str, notes_snippets: List[Dict]) -> str:
+    """
+    Extract concepts, authors, and ideas from notes for live conversation prompting.
+    Returns the full response string (non-streaming) in pipe-delimited format.
+    """
+    notes_block = "\n\n".join(
+        f"Note — {n['title']}:\n{n['snippet'][:300]}"
+        for n in notes_snippets[:6]
+    )
+    messages = [
+        {
+            "role": "system",
+            "content": "You extract key concepts, people, and ideas from research notes. Be concise.",
+        },
+        {
+            "role": "user",
+            "content": f"""From these notes about "{keyword}", extract conversation prompts.
+
+{notes_block}
+
+Reply in EXACTLY this format — three lines, pipe-separated values, nothing else:
+CONCEPTS: concept1 | concept2 | concept3 | concept4 | concept5
+AUTHORS: name1 | name2 | name3 | name4
+IDEAS: short idea 1 | short idea 2 | short idea 3 | short idea 4
+
+Rules:
+- CONCEPTS: theories, frameworks, phenomena, technical terms (2-4 words each)
+- AUTHORS: real thinkers, researchers, writers relevant to this topic
+- IDEAS: specific claims, insights, or questions (5-9 words each)
+- Include 4-6 items per line
+- If nothing fits a category, write: AUTHORS: none
+- Output only the three lines. No preamble, no explanation.""",
+        },
+    ]
+    return _chat(messages, stream=False)
+
+
 def summarize_note(title: str, content: str) -> str:
     """One-paragraph summary. Returns streaming generator."""
     truncated = content[:MAX_NOTE_CHARS_FOR_LLM]

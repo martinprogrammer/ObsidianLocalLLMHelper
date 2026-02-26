@@ -4,7 +4,10 @@ Run with: streamlit run app.py
 """
 import os
 import sys
+import json
+import random
 import streamlit as st
+import streamlit.components.v1 as components
 
 # ── Page config (must be first Streamlit call) ───────────────────────────────
 st.set_page_config(
@@ -123,9 +126,11 @@ def sidebar():
         page = st.radio(
             "Navigate",
             ["Dashboard", "Semantic Search", "Note Analyser", "Link Suggester",
-             "Zettelkasten Advisor", "Research Questions", "Generate Zettel"],
+             "Zettelkasten Advisor", "Research Questions", "Generate Zettel",
+             "Conversation Prompter", "Idea Carousel", "Research Bio"],
             index=["Dashboard", "Semantic Search", "Note Analyser", "Link Suggester",
-                   "Zettelkasten Advisor", "Research Questions", "Generate Zettel"]
+                   "Zettelkasten Advisor", "Research Questions", "Generate Zettel",
+                   "Conversation Prompter", "Idea Carousel", "Research Bio"]
             .index(st.session_state.page),
         )
         st.session_state.page = page
@@ -457,6 +462,616 @@ def page_generate_zettel(notes):
         )
 
 
+# ── Research Bio helpers ──────────────────────────────────────────────────────
+
+def _bio_get_sub_vaults(notes) -> list:
+    """Extract unique top-level folder names from note paths."""
+    vaults = set()
+    for n in notes:
+        parts = n.rel_path.split("/")
+        if len(parts) > 1:
+            vaults.add(parts[0])
+    return sorted(vaults)
+
+
+def _bio_parse_themes(text: str) -> list:
+    """Parse THEME: Name | Description lines into list of dicts."""
+    themes = []
+    for line in text.strip().splitlines():
+        s = line.strip()
+        if s.upper().startswith("THEME:"):
+            body = s.split(":", 1)[1].strip()
+            if "|" in body:
+                name, desc = body.split("|", 1)
+                name = name.strip()
+                desc = desc.strip()
+                if name and desc:
+                    themes.append({"name": name, "description": desc})
+    return themes
+
+
+def page_research_bio(notes):
+    st.title("📝 Research Biography")
+    st.caption(
+        "Analyses your vault to identify your main research themes, "
+        "then writes a professional biography you can use to introduce yourself."
+    )
+
+    stats = st.session_state.stats or vault_statistics(notes)
+
+    hub_notes    = stats.get("hubs", [])
+    hub_titles   = [n.title for n, _ in hub_notes[:8]]
+    hub_snippets = [n.content[:200].replace("\n", " ").strip() for n, _ in hub_notes[:8]]
+    top_tags     = stats.get("top_tags", [])
+    top_tag_names = [t for t, _ in top_tags[:15]]
+    sub_vaults   = _bio_get_sub_vaults(notes)
+
+    col_btn, col_info = st.columns([1, 3])
+    with col_btn:
+        generate = st.button("Generate Biography", type="primary", use_container_width=True)
+    with col_info:
+        st.caption(
+            f"{stats.get('total', 0)} notes · {len(hub_titles)} hub topics · "
+            f"{len(top_tags)} tags · sub-vaults: {', '.join(sub_vaults) or 'root'}"
+        )
+
+    if generate:
+        # ── Step 1: identify themes ───────────────────────────────────────────
+        with st.spinner("Step 1/2 — Analysing research themes…"):
+            raw_themes = llm.identify_research_themes(
+                top_tags=top_tags,
+                hub_titles=hub_titles,
+                hub_snippets=hub_snippets,
+                sub_vaults=sub_vaults,
+            )
+        themes = _bio_parse_themes(raw_themes)
+
+        if not themes:
+            st.warning("Theme extraction didn't return usable results. Try indexing the vault first so hub notes are populated.")
+            st.code(raw_themes)
+            return
+
+        # Show the identified themes as a reference
+        st.divider()
+        st.subheader("Research themes identified")
+        for t in themes:
+            st.markdown(f"**{t['name']}** — {t['description']}")
+
+        # ── Step 2: write the bio ─────────────────────────────────────────────
+        st.divider()
+        st.subheader("Your biography")
+        placeholder = st.empty()
+        full_text = ""
+        for token in llm.generate_professional_bio(
+            themes=themes,
+            hub_titles=hub_titles,
+            top_tags=top_tag_names,
+        ):
+            full_text += token
+            placeholder.markdown(full_text + "▌")
+        placeholder.markdown(full_text)
+
+        word_count = len(full_text.split())
+        st.caption(f"{word_count} words")
+
+        st.divider()
+        st.subheader("Copy")
+        st.code(full_text, language=None)
+
+
+# ── Idea Carousel helpers ─────────────────────────────────────────────────────
+
+def _ic_parse_items(text: str) -> list:
+    """Parse ITEM: Term | Sentence lines into list of dicts."""
+    items = []
+    for line in text.strip().splitlines():
+        s = line.strip()
+        if s.upper().startswith("ITEM:"):
+            body = s.split(":", 1)[1].strip()
+            if "|" in body:
+                term, sentence = body.split("|", 1)
+                term = term.strip()
+                sentence = sentence.strip()
+                if term and sentence:
+                    items.append({"term": term, "sentence": sentence})
+    return items
+
+
+def _ic_build_html(items: list, interval_ms: int = 3000) -> str:
+    """Return a self-contained HTML carousel page."""
+    items_json = json.dumps(items)
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    background: #0f172a;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    color: white;
+    overflow: hidden;
+  }}
+  #card {{
+    text-align: center;
+    padding: 32px 48px;
+    max-width: 820px;
+    width: 100%;
+    transition: opacity 0.45s ease;
+  }}
+  #term {{
+    font-size: 52px;
+    font-weight: 800;
+    color: #7dd3fc;
+    line-height: 1.15;
+    margin-bottom: 22px;
+    letter-spacing: -0.5px;
+  }}
+  #sentence {{
+    font-size: 22px;
+    color: #cbd5e1;
+    line-height: 1.55;
+    max-width: 660px;
+    margin: 0 auto;
+  }}
+  #dots {{
+    display: flex;
+    gap: 7px;
+    justify-content: center;
+    margin-top: 32px;
+    flex-wrap: wrap;
+    max-width: 400px;
+  }}
+  .dot {{
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #1e3a5f;
+    transition: background 0.3s;
+  }}
+  .dot.active {{ background: #7dd3fc; }}
+  #counter {{
+    font-size: 12px;
+    color: #475569;
+    letter-spacing: 2px;
+    margin-top: 12px;
+    text-transform: uppercase;
+  }}
+  #controls {{
+    display: flex;
+    gap: 14px;
+    margin-top: 28px;
+    align-items: center;
+  }}
+  button {{
+    padding: 11px 26px;
+    border-radius: 10px;
+    border: none;
+    cursor: pointer;
+    font-size: 15px;
+    font-weight: 700;
+    transition: background 0.2s, color 0.2s;
+    letter-spacing: 0.3px;
+  }}
+  #btn-prev, #btn-next {{
+    background: #1e293b;
+    color: #94a3b8;
+  }}
+  #btn-prev:hover, #btn-next:hover {{ background: #334155; color: white; }}
+  #btn-toggle {{
+    background: #1d4ed8;
+    color: white;
+    min-width: 130px;
+  }}
+  #btn-toggle:hover {{ background: #1e40af; }}
+  #btn-toggle.paused {{ background: #166534; }}
+  #btn-toggle.paused:hover {{ background: #14532d; }}
+  #pause-banner {{
+    display: none;
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    background: #7f1d1d;
+    color: #fca5a5;
+    text-align: center;
+    padding: 10px;
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 1px;
+  }}
+</style>
+</head>
+<body>
+<div id="pause-banner">⏸ PAUSED</div>
+<div id="card">
+  <div id="term"></div>
+  <div id="sentence"></div>
+  <div id="dots"></div>
+  <div id="counter"></div>
+</div>
+<div id="controls">
+  <button id="btn-prev" onclick="prev()">&#9664; Prev</button>
+  <button id="btn-toggle" onclick="togglePause()">&#9646;&#9646; Stop</button>
+  <button id="btn-next" onclick="next()">Next &#9654;</button>
+</div>
+
+<script>
+const items = {items_json};
+const INTERVAL = {interval_ms};
+let current = 0;
+let running = true;
+let timer = null;
+let animating = false;
+
+function renderDots() {{
+  const c = document.getElementById('dots');
+  c.innerHTML = '';
+  const max = Math.min(items.length, 30);
+  for (let i = 0; i < max; i++) {{
+    const d = document.createElement('div');
+    d.className = 'dot' + (i === current ? ' active' : '');
+    c.appendChild(d);
+  }}
+}}
+
+function showCard(idx) {{
+  if (animating) return;
+  animating = true;
+  const card = document.getElementById('card');
+  card.style.opacity = '0';
+  setTimeout(() => {{
+    current = ((idx % items.length) + items.length) % items.length;
+    document.getElementById('term').textContent = items[current].term;
+    document.getElementById('sentence').textContent = items[current].sentence;
+    document.getElementById('counter').textContent = (current + 1) + ' / ' + items.length;
+    renderDots();
+    card.style.opacity = '1';
+    animating = false;
+  }}, 380);
+}}
+
+function startTimer() {{
+  clearInterval(timer);
+  timer = setInterval(() => {{ if (running) showCard(current + 1); }}, INTERVAL);
+}}
+
+function next() {{ showCard(current + 1); if (running) startTimer(); }}
+function prev() {{ showCard(current - 1); if (running) startTimer(); }}
+
+function togglePause() {{
+  running = !running;
+  const btn = document.getElementById('btn-toggle');
+  const banner = document.getElementById('pause-banner');
+  if (running) {{
+    btn.textContent = '⏸ Stop';
+    btn.classList.remove('paused');
+    banner.style.display = 'none';
+    startTimer();
+  }} else {{
+    btn.innerHTML = '&#9654; Resume';
+    btn.classList.add('paused');
+    banner.style.display = 'block';
+  }}
+}}
+
+// Keyboard: space = pause/resume, arrow keys = prev/next
+document.addEventListener('keydown', e => {{
+  if (e.code === 'Space') {{ e.preventDefault(); togglePause(); }}
+  if (e.code === 'ArrowRight') next();
+  if (e.code === 'ArrowLeft') prev();
+}});
+
+showCard(0);
+startTimer();
+</script>
+</body>
+</html>"""
+
+
+def page_idea_carousel(notes):
+    st.title("🎠 Idea Carousel")
+    st.caption(
+        "One concept at a time, auto-advancing every 3 seconds. "
+        "Space bar or the Stop button to pause. Arrow keys or Prev/Next to navigate."
+    )
+
+    # State
+    for k, v in {"ic_items": None, "ic_keyword": "", "ic_interval": 3}.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+    col_kw, col_speed, col_btn = st.columns([3, 1, 1])
+    with col_kw:
+        keyword = st.text_input(
+            "Topic or keyword",
+            value=st.session_state.ic_keyword,
+            placeholder="e.g. consciousness, emergence, power",
+            label_visibility="collapsed",
+        )
+    with col_speed:
+        interval = st.selectbox("Speed", [2, 3, 4, 5, 8], index=1,
+                                format_func=lambda x: f"{x}s")
+        st.session_state.ic_interval = interval
+    with col_btn:
+        go = st.button("▶ Start Carousel", type="primary", use_container_width=True)
+
+    if go and keyword.strip():
+        st.session_state.ic_keyword = keyword.strip()
+        store = get_store_stats()
+        with st.spinner("Searching vault…"):
+            if store["indexed_notes"] > 0:
+                q_emb = embed_text(keyword.strip())
+                hits = semantic_search(q_emb, n_results=15)
+            else:
+                kw_lower = keyword.strip().lower()
+                hits = [
+                    {"title": n.title, "snippet": n.content[:400]}
+                    for n in notes
+                    if kw_lower in n.title.lower() or kw_lower in n.content.lower()
+                ][:15]
+
+        if not hits:
+            st.warning("No matching notes found. Try a different keyword or index the vault first.")
+            return
+
+        snippets = [{"title": h["title"], "snippet": h.get("snippet", h.get("snippet", ""))} for h in hits]
+        with st.spinner("Generating carousel items with AI…"):
+            raw = llm.generate_carousel_items(keyword.strip(), snippets)
+
+        items = _ic_parse_items(raw)
+        if not items:
+            st.warning("The model didn't return valid items. Try again or rephrase the keyword.")
+            st.code(raw)
+            return
+
+        st.session_state.ic_items = items
+
+    if st.session_state.ic_items:
+        items = st.session_state.ic_items
+        interval_ms = st.session_state.ic_interval * 1000
+        st.caption(f"{len(items)} items · {st.session_state.ic_interval}s interval · **Space** = pause · **← →** = navigate")
+        html = _ic_build_html(items, interval_ms)
+        components.html(html, height=520, scrolling=False)
+
+        with st.expander("📋 All items", expanded=False):
+            for i, item in enumerate(items, 1):
+                st.markdown(f"**{i}. {item['term']}** — {item['sentence']}")
+    else:
+        st.markdown(
+            """
+            <div style="margin-top:48px;text-align:center;color:#4b5563;font-size:16px;">
+            Type a topic and press <b>▶ Start Carousel</b>.<br><br>
+            Cards auto-advance every few seconds — use it as a live prompt feed<br>
+            during talks or conversations.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+# ── Conversation Prompter helpers ─────────────────────────────────────────────
+
+def _cp_init_state():
+    defaults = {
+        "cp_paused": False,
+        "cp_chips": None,       # {"concepts": [...], "authors": [...], "ideas": [...]}
+        "cp_hits": [],          # all search hits for the current keyword
+        "cp_batch": 0,          # which batch of 5 hits we're on
+        "cp_keyword": "",
+        "cp_search_mode": "",
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+
+def _cp_search(keyword: str, notes) -> tuple:
+    """Return (hits_list, mode_string). Semantic if indexed, text-match fallback."""
+    store = get_store_stats()
+    if store["indexed_notes"] > 0:
+        q_emb = embed_text(keyword)
+        hits = semantic_search(q_emb, n_results=20)
+        return hits, "semantic"
+    # Text fallback
+    kw_lower = keyword.lower()
+    matches = [n for n in notes if kw_lower in n.title.lower() or kw_lower in n.content.lower()]
+    matches.sort(key=lambda n: n.content.lower().count(kw_lower), reverse=True)
+    hits = [
+        {"title": n.title, "snippet": n.content[:400], "rel_path": n.rel_path}
+        for n in matches[:20]
+    ]
+    return hits, "text"
+
+
+def _cp_parse_chips(text: str) -> dict:
+    """Parse pipe-delimited LLM response into concept/author/idea lists."""
+    chips = {"concepts": [], "authors": [], "ideas": []}
+    bad = {"none", "n/a", ""}
+    for line in text.strip().splitlines():
+        s = line.strip()
+        u = s.upper()
+        if u.startswith("CONCEPTS"):
+            items = s.split(":", 1)[1]
+            chips["concepts"] = [x.strip() for x in items.split("|") if x.strip().lower() not in bad]
+        elif u.startswith("AUTHORS") or u.startswith("PEOPLE"):
+            items = s.split(":", 1)[1]
+            chips["authors"] = [x.strip() for x in items.split("|") if x.strip().lower() not in bad]
+        elif u.startswith("IDEAS") or u.startswith("IDEA"):
+            items = s.split(":", 1)[1]
+            chips["ideas"] = [x.strip() for x in items.split("|") if x.strip().lower() not in bad]
+    return chips
+
+
+def _cp_get_batch(hits: list, batch_idx: int, size: int = 5) -> list:
+    """Slice hits into a rotating batch."""
+    if not hits:
+        return []
+    start = (batch_idx * size) % len(hits)
+    slc = hits[start:start + size]
+    if len(slc) < size:          # wrap around
+        slc += hits[:size - len(slc)]
+    return slc
+
+
+def _cp_render_chips(chips: dict, paused: bool):
+    """Render concept/author/idea chips as large coloured HTML badges."""
+    opacity = "0.35" if paused else "1.0"
+
+    def badge_row(items, bg, fg):
+        if not items:
+            return '<span style="color:#6b7280;font-size:16px;">—</span>'
+        return "".join(
+            f'<span style="display:inline-block;margin:5px 6px;padding:10px 22px;'
+            f'background:{bg};color:{fg};border-radius:24px;font-size:24px;'
+            f'font-weight:600;letter-spacing:0.3px;opacity:{opacity};">{item}</span>'
+            for item in items
+        )
+
+    label_style = (
+        "font-size:11px;text-transform:uppercase;letter-spacing:2px;"
+        "margin-bottom:6px;padding-left:4px;"
+    )
+
+    if paused:
+        pause_bar = (
+            '<div style="text-align:center;padding:10px 0;margin-bottom:14px;'
+            'background:#7f1d1d;border-radius:8px;font-size:17px;font-weight:700;'
+            'color:#fca5a5;">⏸ PAUSED — press Resume when ready</div>'
+        )
+    else:
+        pause_bar = ""
+
+    html = f"""
+    {pause_bar}
+    <div style="padding:8px 4px;">
+      <div style="color:#93c5fd;{label_style}">Concepts &amp; Frameworks</div>
+      <div style="margin-bottom:18px;">{badge_row(chips['concepts'], '#1e3a5f', '#bfdbfe')}</div>
+      <div style="color:#86efac;{label_style}">People &amp; Authors</div>
+      <div style="margin-bottom:18px;">{badge_row(chips['authors'], '#14532d', '#bbf7d0')}</div>
+      <div style="color:#fed7aa;{label_style}">Ideas &amp; Claims</div>
+      <div style="margin-bottom:8px;">{badge_row(chips['ideas'], '#7c2d12', '#fed7aa')}</div>
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def page_conversation_prompter(notes):
+    st.title("💬 Conversation Prompter")
+    st.caption(
+        "Type a keyword → get concept chips from your vault. "
+        "Use as memory-joggers during talks or conversations."
+    )
+
+    _cp_init_state()
+
+    # ── Search row ────────────────────────────────────────────────────────────
+    col_kw, col_btn = st.columns([4, 1])
+    with col_kw:
+        keyword = st.text_input(
+            "Topic or keyword",
+            value=st.session_state.cp_keyword,
+            placeholder="e.g. consciousness, power dynamics, emergence",
+            disabled=st.session_state.cp_paused,
+            label_visibility="collapsed",
+        )
+    with col_btn:
+        search_hit = st.button(
+            "🔍 Find Prompts",
+            type="primary",
+            use_container_width=True,
+            disabled=st.session_state.cp_paused,
+        )
+
+    # ── Control row ───────────────────────────────────────────────────────────
+    col_stop, col_next, col_clear = st.columns(3)
+
+    with col_stop:
+        if st.session_state.cp_paused:
+            if st.button("▶ Resume", use_container_width=True, type="primary"):
+                st.session_state.cp_paused = False
+                st.rerun()
+        else:
+            stop_disabled = st.session_state.cp_chips is None
+            if st.button("⏸ Stop", use_container_width=True, disabled=stop_disabled):
+                st.session_state.cp_paused = True
+                st.rerun()
+
+    with col_next:
+        next_disabled = (not st.session_state.cp_hits) or st.session_state.cp_paused
+        if st.button("⏭ Next Ideas", use_container_width=True, disabled=next_disabled):
+            st.session_state.cp_batch += 1
+            batch = _cp_get_batch(st.session_state.cp_hits, st.session_state.cp_batch)
+            with st.spinner("Generating new prompts…"):
+                raw = llm.extract_conversation_prompts(st.session_state.cp_keyword, batch)
+            st.session_state.cp_chips = _cp_parse_chips(raw)
+            st.rerun()
+
+    with col_clear:
+        if st.button("🗑 Clear", use_container_width=True):
+            for k in ("cp_paused", "cp_chips", "cp_hits", "cp_batch", "cp_keyword", "cp_search_mode"):
+                st.session_state[k] = (False if k == "cp_paused" else (None if k == "cp_chips" else ([] if k == "cp_hits" else (0 if k == "cp_batch" else ""))))
+            st.rerun()
+
+    # ── Search action ─────────────────────────────────────────────────────────
+    if search_hit and keyword.strip():
+        st.session_state.cp_keyword = keyword.strip()
+        st.session_state.cp_batch = 0
+        st.session_state.cp_paused = False
+
+        with st.spinner("Searching vault…"):
+            hits, mode = _cp_search(keyword.strip(), notes)
+        st.session_state.cp_hits = hits
+        st.session_state.cp_search_mode = mode
+
+        if not hits:
+            st.warning("No matching notes found. Try a different keyword or index the vault first.")
+        else:
+            batch = _cp_get_batch(hits, 0)
+            with st.spinner("Extracting concepts with AI…"):
+                raw = llm.extract_conversation_prompts(keyword.strip(), batch)
+            st.session_state.cp_chips = _cp_parse_chips(raw)
+            st.rerun()
+
+    # ── Display chips ─────────────────────────────────────────────────────────
+    if st.session_state.cp_chips:
+        st.divider()
+
+        # Show search context
+        mode_label = "🔭 semantic" if st.session_state.cp_search_mode == "semantic" else "🔤 text"
+        total = len(st.session_state.cp_hits)
+        batch_num = st.session_state.cp_batch + 1
+        batch_size = 5
+        total_batches = max(1, (total + batch_size - 1) // batch_size)
+        st.caption(
+            f"**{st.session_state.cp_keyword}** · {total} notes matched ({mode_label}) "
+            f"· batch {batch_num}/{total_batches} · press **Next Ideas** to rotate"
+        )
+
+        _cp_render_chips(st.session_state.cp_chips, st.session_state.cp_paused)
+
+        # Source notes expander
+        with st.expander("📄 Source notes for this batch", expanded=False):
+            batch = _cp_get_batch(st.session_state.cp_hits, st.session_state.cp_batch)
+            for h in batch:
+                st.markdown(f"- **{h['title']}** — `{h.get('rel_path', '')}`")
+
+    elif not search_hit:
+        st.markdown(
+            """
+            <div style="margin-top:40px;text-align:center;color:#4b5563;font-size:16px;">
+            Type a keyword and press <b>Find Prompts</b> to begin.<br><br>
+            During a presentation: press <b>⏸ Stop</b> while you talk,<br>
+            <b>▶ Resume</b> or <b>⏭ Next Ideas</b> when you need a new angle.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -482,6 +1097,12 @@ def main():
         page_research_questions(notes)
     elif page == "Generate Zettel":
         page_generate_zettel(notes)
+    elif page == "Conversation Prompter":
+        page_conversation_prompter(notes)
+    elif page == "Idea Carousel":
+        page_idea_carousel(notes)
+    elif page == "Research Bio":
+        page_research_bio(notes)
 
 
 if __name__ == "__main__":
