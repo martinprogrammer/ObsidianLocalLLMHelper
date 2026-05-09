@@ -3,9 +3,12 @@ LLMObsidian — Local AI assistant for Obsidian knowledge management.
 Run with: streamlit run app.py
 """
 import os
+import re
 import sys
 import json
 import random
+from datetime import date as _dt_date
+from pathlib import Path
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -31,6 +34,11 @@ from core.analyzer import (
     tag_distribution, find_notes_by_tag,
 )
 import core.llm as llm
+from core.bills import (
+    load_bills, add_bill, update_bill, delete_bill,
+    get_bills_due, spending_by_category, spending_in_period,
+    bills_summary_for_llm, CATEGORIES, FREQUENCIES,
+)
 
 
 # ── Session state helpers ─────────────────────────────────────────────────────
@@ -123,15 +131,16 @@ def sidebar():
                 st.success("Index cleared.")
 
         st.divider()
+        _pages = [
+            "Dashboard", "Semantic Search", "Note Analyser", "Link Suggester",
+            "Zettelkasten Advisor", "Research Questions", "Generate Zettel",
+            "Conversation Prompter", "Idea Carousel", "Research Bio", "Vault Editor",
+            "Bill Tracker",
+        ]
         page = st.radio(
             "Navigate",
-            ["Dashboard", "Semantic Search", "Note Analyser", "Link Suggester",
-             "Zettelkasten Advisor", "Research Questions", "Generate Zettel",
-             "Conversation Prompter", "Idea Carousel", "Research Bio"],
-            index=["Dashboard", "Semantic Search", "Note Analyser", "Link Suggester",
-                   "Zettelkasten Advisor", "Research Questions", "Generate Zettel",
-                   "Conversation Prompter", "Idea Carousel", "Research Bio"]
-            .index(st.session_state.page),
+            _pages,
+            index=_pages.index(st.session_state.page) if st.session_state.page in _pages else 0,
         )
         st.session_state.page = page
 
@@ -1072,6 +1081,357 @@ def page_conversation_prompter(notes):
         )
 
 
+# ── Vault Editor ──────────────────────────────────────────────────────────────
+
+_FRONTMATTER_RE = re.compile(r'^---\r?\n.*?\r?\n---\r?\n?', re.DOTALL)
+
+_POSITION_OPTIONS = [
+    "After frontmatter (or top if none)",
+    "Prepend — very top of file",
+    "Append — bottom of file",
+    "Replace frontmatter",
+]
+
+_DEFAULT_SNIPPET = """---
+type: field-note
+status: to-atomize
+date: 2026-02-26
+---"""
+
+
+def _ve_apply(original: str, insert_text: str, position: str) -> str:
+    """Return modified file content with insert_text applied."""
+    text = insert_text.rstrip("\n") + "\n"
+
+    if position == "Prepend — very top of file":
+        return text + original
+
+    elif position == "Append — bottom of file":
+        return original.rstrip("\n") + "\n" + text
+
+    elif position == "Replace frontmatter":
+        body = _FRONTMATTER_RE.sub("", original).lstrip("\n")
+        return text + body
+
+    else:  # "After frontmatter (or top if none)"
+        m = _FRONTMATTER_RE.match(original)
+        if m:
+            after = original[m.end():]
+            return original[: m.end()] + text + after.lstrip("\n")
+        return text + original
+
+
+def page_vault_editor(notes):
+    st.title("✏️ Vault Editor")
+    st.caption(
+        "Batch-edit notes in a directory: prepend, append, or replace text/frontmatter. "
+        "**Changes are written to disk** — use the preview and confirm before applying."
+    )
+
+    vault_root = Path(st.session_state.vault_path)
+
+    # ── Directory selector ────────────────────────────────────────────────────
+    dirs = {"(all notes — entire vault)"}
+    for n in notes:
+        p = Path(n.rel_path).parent
+        while str(p) != ".":
+            dirs.add(str(p))
+            p = p.parent
+    dir_list = ["(all notes — entire vault)"] + sorted(dirs - {"(all notes — entire vault)"})
+
+    col_dir, col_pos = st.columns([2, 1])
+    with col_dir:
+        selected_dir = st.selectbox("Target directory", dir_list)
+    with col_pos:
+        position = st.selectbox("Insert position", _POSITION_OPTIONS)
+
+    # ── Filter notes ──────────────────────────────────────────────────────────
+    if selected_dir == "(all notes — entire vault)":
+        target_notes = list(notes)
+    else:
+        prefix = selected_dir + "/"
+        target_notes = [n for n in notes if n.rel_path.startswith(prefix)]
+
+    with st.expander("⚙️ Additional filters", expanded=False):
+        skip_has_fm = st.checkbox("Skip notes that already have frontmatter")
+        skip_has_tags = st.checkbox("Skip notes that already have tags")
+        only_no_tags = st.checkbox("Only notes WITHOUT any tags")
+        filename_contains = st.text_input("Only files whose path contains (leave blank for all)")
+
+    if skip_has_fm:
+        target_notes = [n for n in target_notes if not n.frontmatter]
+    if skip_has_tags:
+        target_notes = [n for n in target_notes if not n.tags]
+    if only_no_tags:
+        target_notes = [n for n in target_notes if not n.tags]
+    if filename_contains.strip():
+        target_notes = [n for n in target_notes if filename_contains.strip().lower() in n.rel_path.lower()]
+
+    st.info(f"**{len(target_notes)} notes** match the current filters.")
+
+    # ── Text to insert ────────────────────────────────────────────────────────
+    st.subheader("Text to insert")
+    insert_text = st.text_area(
+        "Content",
+        value=_DEFAULT_SNIPPET,
+        height=160,
+        help="Paste any text here — frontmatter YAML, a section header, a footer, anything.",
+    )
+
+    # ── Preview ───────────────────────────────────────────────────────────────
+    with st.expander(f"📋 Affected notes ({len(target_notes)})", expanded=False):
+        for n in target_notes[:50]:
+            st.markdown(f"- `{n.rel_path}`")
+        if len(target_notes) > 50:
+            st.caption(f"… and {len(target_notes) - 50} more")
+
+    if target_notes and insert_text.strip():
+        if st.button("👁 Preview first note"):
+            n = target_notes[0]
+            try:
+                original = Path(n.path).read_text(encoding="utf-8")
+                modified = _ve_apply(original, insert_text, position)
+                col_b, col_a = st.columns(2)
+                with col_b:
+                    st.caption(f"**Before** — `{n.rel_path}`")
+                    st.code(original[:800], language="markdown")
+                with col_a:
+                    st.caption("**After**")
+                    st.code(modified[:800], language="markdown")
+            except Exception as exc:
+                st.error(f"Could not read file: {exc}")
+
+    # ── Confirm + Apply ───────────────────────────────────────────────────────
+    st.divider()
+    confirm = st.checkbox(
+        f"I understand this will overwrite {len(target_notes)} file(s) on disk and cannot be undone."
+    )
+
+    if st.button("✏️ Apply to All Notes", type="primary", disabled=not confirm):
+        if not insert_text.strip():
+            st.error("Nothing to insert — text area is empty.")
+        elif not target_notes:
+            st.warning("No notes match the current filters.")
+        else:
+            progress = st.progress(0, text="Applying changes…")
+            errors = []
+            for i, n in enumerate(target_notes):
+                try:
+                    original = Path(n.path).read_text(encoding="utf-8")
+                    modified = _ve_apply(original, insert_text, position)
+                    Path(n.path).write_text(modified, encoding="utf-8")
+                except Exception as exc:
+                    errors.append(f"{n.rel_path}: {exc}")
+                progress.progress((i + 1) / len(target_notes), text=f"{i + 1}/{len(target_notes)}")
+            progress.empty()
+
+            if errors:
+                st.error(f"{len(errors)} file(s) failed:")
+                for e in errors:
+                    st.code(e)
+                st.success(f"✅ Modified {len(target_notes) - len(errors)} notes (with {len(errors)} errors).")
+            else:
+                st.success(f"✅ Successfully modified {len(target_notes)} notes.")
+
+            # Reload vault so in-memory notes reflect disk state
+            st.session_state.notes = None
+            st.session_state.stats = None
+
+
+# ── Bill Tracker ──────────────────────────────────────────────────────────────
+
+def _bt_bill_form(bill, form_key):
+    is_edit = bill is not None
+    with st.form(form_key):
+        col1, col2 = st.columns(2)
+        with col1:
+            name = st.text_input("Name *", value=bill["name"] if is_edit else "")
+            cat_idx = CATEGORIES.index(bill["category"]) if is_edit and bill.get("category") in CATEGORIES else 0
+            category = st.selectbox("Category *", CATEGORIES, index=cat_idx)
+            amount = st.number_input("Amount *", min_value=0.01, step=0.01,
+                                     value=float(bill["amount"]) if is_edit else 0.01)
+            currency = st.text_input("Currency", max_chars=3,
+                                     value=bill.get("currency", "EUR") if is_edit else "EUR")
+        with col2:
+            freq_idx = FREQUENCIES.index(bill["frequency"]) if is_edit and bill.get("frequency") in FREQUENCIES else 2
+            frequency = st.selectbox("Frequency", FREQUENCIES, index=freq_idx)
+            try:
+                dp_val = _dt_date.fromisoformat(bill["date_paid"]) if is_edit and bill.get("date_paid") else _dt_date.today()
+            except ValueError:
+                dp_val = _dt_date.today()
+            date_paid = st.date_input("Date paid *", value=dp_val)
+            try:
+                nd_val = _dt_date.fromisoformat(bill["next_due"]) if is_edit and bill.get("next_due") else _dt_date.today()
+            except ValueError:
+                nd_val = _dt_date.today()
+            next_due = st.date_input("Next due date", value=nd_val)
+        notes = st.text_area("Notes", value=bill.get("notes", "") if is_edit else "", height=70)
+        submitted = st.form_submit_button("💾 Save Changes" if is_edit else "➕ Add Bill", type="primary")
+
+    if submitted:
+        if not name.strip():
+            st.error("Name is required.")
+        elif amount <= 0:
+            st.error("Amount must be greater than zero.")
+        else:
+            if is_edit:
+                update_bill(bill["id"], name=name.strip(), category=category,
+                            amount=amount, currency=currency.upper(),
+                            date_paid=date_paid.isoformat(), next_due=next_due.isoformat(),
+                            frequency=frequency, notes=notes.strip())
+                st.success(f"Updated '{name}'.")
+            else:
+                add_bill(name=name.strip(), category=category, amount=amount,
+                         currency=currency.upper(), date_paid=date_paid.isoformat(),
+                         next_due=next_due.isoformat(), frequency=frequency, notes=notes.strip())
+                st.success(f"Added '{name}'.")
+            st.rerun()
+
+
+def _bt_add_edit_tab(bills):
+    mode = st.radio("", ["➕ Add new bill", "✏️ Edit existing bill"], horizontal=True)
+    st.divider()
+    if mode == "➕ Add new bill":
+        _bt_bill_form(bill=None, form_key="bt_add_form")
+    else:
+        if not bills:
+            st.info("No bills yet — add one first.")
+            return
+        choices = {f"{b['name']} ({b['category']}) — {b.get('currency','')} {float(b.get('amount',0)):.2f}": b
+                   for b in bills}
+        chosen = choices[st.selectbox("Select bill to edit", list(choices.keys()))]
+        _bt_bill_form(bill=chosen, form_key="bt_edit_form")
+
+
+def _bt_all_bills_tab(bills):
+    if not bills:
+        st.info("No bills recorded yet. Use **Add / Edit** to add your first bill.")
+        return
+    st.caption(f"{len(bills)} bills · sorted by next due date")
+    for b in sorted(bills, key=lambda x: x.get("next_due", "")):
+        label = (f"**{b['name']}** — {b.get('currency','')} {float(b.get('amount',0)):.2f}"
+                 f" · {b.get('category','')} · next due {b.get('next_due','?')}")
+        with st.expander(label):
+            c1, c2, c3 = st.columns(3)
+            c1.markdown(f"**Paid:** {b.get('date_paid','?')}")
+            c2.markdown(f"**Frequency:** {b.get('frequency','?')}")
+            c3.markdown(f"**ID:** `{b['id']}`")
+            if b.get("notes"):
+                st.caption(b["notes"])
+            if st.button("🗑️ Delete this bill", key=f"del_{b['id']}"):
+                delete_bill(b["id"])
+                st.success(f"Deleted '{b['name']}'.")
+                st.rerun()
+
+
+def _bt_due_tab():
+    days = st.slider("Show bills due within (days)", 3, 90, 14)
+    due = get_bills_due(days_ahead=days)
+    if not due:
+        st.success(f"No bills due in the next {days} days. ✓")
+        return
+    for b in due:
+        dl = b["days_left"]
+        label = f"**{b['name']}** — {b.get('currency','')} {float(b.get('amount',0)):.2f}"
+        if dl < 0:
+            st.error(f"🔴 OVERDUE by {abs(dl)} day(s) — {label} (was due {b.get('next_due','')})")
+        elif dl == 0:
+            st.error(f"🔴 DUE TODAY — {label}")
+        elif dl <= 3:
+            st.warning(f"🟠 Due in {dl} day(s) — {label} on {b.get('next_due','')}")
+        elif dl <= 7:
+            st.warning(f"🟡 Due in {dl} day(s) — {label} on {b.get('next_due','')}")
+        else:
+            st.info(f"📅 Due in {dl} day(s) — {label} on {b.get('next_due','')}")
+
+
+def _bt_reports_tab():
+    col1, col2 = st.columns(2)
+    with col1:
+        start = st.date_input("From", value=_dt_date.today().replace(day=1))
+    with col2:
+        end = st.date_input("To", value=_dt_date.today())
+    if start > end:
+        st.error("Start date must be before end date.")
+        return
+
+    by_cat = spending_by_category(start.isoformat(), end.isoformat())
+    period_bills = spending_in_period(start.isoformat(), end.isoformat())
+    total = sum(by_cat.values())
+
+    st.metric("Total spent in period", f"{total:.2f}")
+    st.divider()
+
+    if not by_cat:
+        st.info("No bills paid in this period.")
+        return
+
+    st.subheader("By category")
+    for cat, amt in by_cat.items():
+        pct = (amt / total * 100) if total else 0
+        col_a, col_b = st.columns([3, 1])
+        with col_a:
+            st.progress(pct / 100, text=f"**{cat}** — {amt:.2f}")
+        with col_b:
+            st.caption(f"{pct:.0f}%")
+
+    st.divider()
+    st.subheader("Individual payments")
+    for b in period_bills:
+        st.markdown(
+            f"- **{b['name']}** ({b.get('category','')}) — "
+            f"{b.get('currency','')} {float(b.get('amount',0)):.2f} · paid {b.get('date_paid','?')}"
+        )
+
+
+def _bt_ai_tab(bills):
+    st.caption(
+        "Ask anything about your bills in plain English. "
+        "Python handles the maths — the AI just formats the answer."
+    )
+    query = st.text_input("Your question",
+                          placeholder="e.g. How much did I spend on insurance this year?")
+    if st.button("🤖 Ask", type="primary") and query.strip():
+        context = bills_summary_for_llm(bills)
+        placeholder = st.empty()
+        full_text = ""
+        for token in llm.answer_bill_query(query.strip(), context):
+            full_text += token
+            placeholder.markdown(full_text + "▌")
+        placeholder.markdown(full_text)
+
+
+def page_bill_tracker(_notes):
+    st.title("💳 Bill Tracker")
+    st.caption("Track recurring bills, get alerts for upcoming payments, and query spending history.")
+
+    bills = load_bills()
+
+    due_soon = get_bills_due(days_ahead=7)
+    if due_soon:
+        overdue = [b for b in due_soon if b["days_left"] <= 0]
+        upcoming = [b for b in due_soon if b["days_left"] > 0]
+        if overdue:
+            st.error(f"⚠️ Overdue: {', '.join(b['name'] for b in overdue)}")
+        if upcoming:
+            names = ", ".join(f"{b['name']} ({b['days_left']}d)" for b in upcoming)
+            st.warning(f"📅 Due soon: {names}")
+
+    tab_add, tab_all, tab_due, tab_report, tab_ai = st.tabs(
+        ["➕ Add / Edit", "📋 All Bills", "⚠️ Due Soon", "📊 Reports", "🤖 Ask AI"]
+    )
+    with tab_add:
+        _bt_add_edit_tab(bills)
+    with tab_all:
+        _bt_all_bills_tab(bills)
+    with tab_due:
+        _bt_due_tab()
+    with tab_report:
+        _bt_reports_tab()
+    with tab_ai:
+        _bt_ai_tab(bills)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -1103,6 +1463,10 @@ def main():
         page_idea_carousel(notes)
     elif page == "Research Bio":
         page_research_bio(notes)
+    elif page == "Vault Editor":
+        page_vault_editor(notes)
+    elif page == "Bill Tracker":
+        page_bill_tracker(notes)
 
 
 if __name__ == "__main__":

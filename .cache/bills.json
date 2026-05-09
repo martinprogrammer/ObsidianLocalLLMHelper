@@ -1,0 +1,26 @@
+[
+  {
+    "id": "a428c569",
+    "name": "Michelangelo electricity",
+    "category": "utilities",
+    "amount": 255.43,
+    "currency": "EUR",
+    "date_paid": "2026-04-01",
+    "next_due": "2026-05-04",
+    "frequency": "monthly",
+    "notes": "",
+    "created": "2026-05-04"
+  },
+  {
+    "id": "77698087",
+    "name": "Michelangelo water",
+    "category": "utilities",
+    "amount": 313.0,
+    "currency": "EUR",
+    "date_paid": "2026-04-02",
+    "next_due": "2026-05-02",
+    "frequency": "monthly",
+    "notes": "",
+    "created": "2026-05-04"
+  }
+]

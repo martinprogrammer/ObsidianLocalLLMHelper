@@ -404,3 +404,23 @@ def summarize_note(title: str, content: str) -> str:
         },
     ]
     return stream_response(messages)
+
+
+def answer_bill_query(query: str, bills_context: str) -> Generator:
+    """Answer a NL question about bills using structured bill data as context."""
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are a personal finance assistant. "
+                "Answer questions about the user's bills using only the data provided. "
+                "Do not invent amounts or dates not in the data. "
+                "When summing amounts, list the individual items first, then give the total."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"My bill records:\n\n{bills_context}\n\nQuestion: {query}",
+        },
+    ]
+    return stream_response(messages)

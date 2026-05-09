@@ -4,7 +4,7 @@ import os
 VAULT_PATH = os.environ.get("VAULT_PATH", "/Users/natwollny/Documents/Obsidian")
 
 # Ollama model (must be pulled via: ollama pull qwen2)
-LLM_MODEL = os.environ.get("LLM_MODEL", "qwen2:latest")
+LLM_MODEL = os.environ.get("LLM_MODEL", "qwen2.5:14b")
 
 # Local embedding model (downloaded on first use, ~90MB)
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
